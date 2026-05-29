@@ -168,7 +168,7 @@ def show_stats():
     """展示汇总统计"""
     st.header("汇总统计")
     try:
-        resp = requests.get(f"{API_BASE}/stats", timeout=5)
+        resp = requests.get(f"{API_BASE}/stats", timeout=60)
         if resp.status_code == 200:
             stats = resp.json()
             col1, col2, col3 = st.columns(3)
@@ -208,8 +208,8 @@ def show_stats():
                     st.markdown(f"- {ft_labels.get(k, k)}: **{v}** 次")
         else:
             st.info("暂无评测数据，请先运行评测")
-    except requests.exceptions.ConnectionError:
-        st.info("无法连接到后端服务，请确保 FastAPI 服务已启动")
+    except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
+        st.info("后端服务正在启动中，请等待 30 秒后刷新页面（Render 免费实例冷启动较慢）")
 
 
 # ====================================================
