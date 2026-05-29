@@ -3,11 +3,13 @@
 import json
 from textwrap import dedent
 
+import os
+
 import streamlit as st
 import requests
 
-# 服务端地址
-API_BASE = "http://localhost:8080"
+# 服务端地址（支持环境变量配置，方便部署）
+API_BASE = os.environ.get("API_BASE", "http://localhost:8080")
 
 # 页面配置
 st.set_page_config(
