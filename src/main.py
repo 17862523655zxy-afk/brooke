@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import os
 import uvicorn
 
 from src.config import settings
@@ -142,4 +143,5 @@ async def get_stats():
 
 
 if __name__ == "__main__":
-    uvicorn.run("src.main:app", host="0.0.0.0", port=8080, reload=True)
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("src.main:app", host="0.0.0.0", port=port, reload=False)
