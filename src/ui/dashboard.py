@@ -1,7 +1,4 @@
-"""Streamlit 仪表盘：场景选择、对话展示、评分可视化、汇总统计."""
-
-import json
-from textwrap import dedent
+"""Streamlit 仪表盘：场景选择、对话展示、评分可视化、汇总统计、历史记录."""
 
 import os
 
@@ -21,9 +18,19 @@ st.set_page_config(
 st.title("复杂外呼场景多轮对话评测系统")
 st.caption("Scenario → Dialogue → Evaluation → Failure Analysis")
 
+# ====================================================
+# Session State 初始化
+# ====================================================
+
+if "history" not in st.session_state:
+    st.session_state.history = []  # 存储每次评测的完整 data
+
+if "selected_history_idx" not in st.session_state:
+    st.session_state.selected_history_idx = None
+
 
 # ====================================================
-# 侧边栏：场景配置
+# 侧边栏：场景配置 + 历史记录
 # ====================================================
 
 with st.sidebar:
@@ -56,15 +63,42 @@ with st.sidebar:
     with run_col:
         run_btn = st.button("运行评测", type="primary", use_container_width=True)
 
+    # ---- 历史记录入口 ----
+    if st.session_state.history:
+        st.divider()
+        st.header("📚 历史评测")
+        st.caption(f"共 {len(st.session_state.history)} 条记录（当前会话）")
+
+        for idx, h in enumerate(reversed(st.session_state.history)):
+            real_idx = len(st.session_state.history) - 1 - idx
+            sc = h.get("scenario", {})
+            rep = h.get("report", {})
+            persona_label = {
+                "normal": "正常", "impatient": "不耐烦",
+                "hesitant": "犹豫", "rejecting": "拒绝",
+                "angry": "愤怒", "silent": "沉默",
+            }.get(sc.get("user_persona", ""), "未知")
+            score = rep.get("overall_score", 0)
+            color = "🟢" if score >= 70 else ("🟠" if score >= 40 else "🔴")
+
+            if st.button(
+                f"{color} {persona_label} | {score:.0f}分",
+                key=f"hist_{real_idx}",
+                use_container_width=True,
+            ):
+                st.session_state.selected_history_idx = real_idx
+                st.rerun()
+
 
 # ====================================================
 # 主区域
 # ====================================================
 
-def show_report(data: dict):
+def show_report(data: dict, readonly: bool = False):
     """展示评测报告"""
     report = data.get("report", {})
     dialogue = data.get("dialogue", {})
+    scenario = data.get("scenario", {})
 
     # ---- 概览 ----
     st.subheader("评测概览")
@@ -128,6 +162,8 @@ def show_report(data: dict):
     conv_text = dialogue.get("conversation", "")
     if conv_text:
         st.text_area("完整对话", conv_text, height=300, disabled=True)
+    else:
+        st.info("暂无对话记录")
 
     # ---- 失败归因 ----
     failure = report.get("failure_analysis")
@@ -163,10 +199,9 @@ def show_report(data: dict):
                 f"- [轮次 {v.get('turn_id')}] :{color}[{v.get('severity')}] {v.get('description')}"
             )
 
-    # ---- 用户画像分析 ----
+    # ---- 用户画像分析（使用 expander 替代 dialog，更兼容） ----
     st.divider()
-    persona_key = f"persona_analysis_{report.get('session_id', '0')}"
-    if st.button("👤 分析用户画像", key=persona_key, use_container_width=True):
+    with st.expander("👤 点击展开：用户画像深度分析", expanded=False):
         show_persona_analysis(data)
 
 
@@ -179,7 +214,6 @@ def show_persona_analysis(data: dict):
     persona = scenario.get("user_persona", "unknown")
     task_type = scenario.get("task_type", "unknown")
 
-    # 用户画像标签映射
     persona_labels = {
         "normal": ("正常用户", "😐", "态度友好，愿意配合"),
         "impatient": ("不耐烦用户", "⏱️", "时间紧迫，语气急促，容易失去耐心"),
@@ -191,177 +225,179 @@ def show_persona_analysis(data: dict):
 
     label, icon, desc = persona_labels.get(persona, ("未知用户", "❓", ""))
 
-    # 使用 dialog 弹出分析页面
-    @st.dialog(f"{icon} 用户画像深度分析", width="large")
-    def persona_dialog():
-        # === 基本信息 ===
-        st.subheader("画像标签")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("画像类型", f"{icon} {label}")
-        with col2:
-            st.metric("任务场景", task_type)
-        with col3:
-            st.metric("对话轮次", dialogue.get("turn_count", 0))
+    # === 基本信息 ===
+    st.subheader("画像标签")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("画像类型", f"{icon} {label}")
+    with col2:
+        task_labels = {"appointment": "预约外呼", "renewal": "续费提醒", "info_collection": "信息采集"}
+        st.metric("任务场景", task_labels.get(task_type, task_type))
+    with col3:
+        st.metric("对话轮次", dialogue.get("turn_count", 0))
 
-        st.caption(desc)
-        st.divider()
+    st.caption(desc)
+    st.divider()
 
-        # === 从对话中提取行为数据 ===
-        turns = dialogue.get("turns", [])
-        user_turns = [t for t in turns if t.get("speaker") == "user"]
+    # === 从对话中提取行为数据 ===
+    turns = dialogue.get("turns", [])
+    user_turns = [t for t in turns if t.get("speaker") == "user"]
 
-        if not user_turns:
-            st.info("暂无用户对话数据")
-            return
+    if not user_turns:
+        st.info("暂无用户对话数据（可能是 API 调用失败导致对话未生成）")
+        # 继续展示画像说明，即使没数据
+        _show_persona_static_info(persona)
+        return
 
-        # 情绪变化
-        emotions = [t.get("metadata", {}).get("emotion", "neutral") for t in user_turns]
-        cooperation_levels = [t.get("metadata", {}).get("cooperation_level", 0.5) for t in user_turns]
-        behaviours = [t.get("metadata", {}).get("behaviour", "normal") for t in user_turns]
+    emotions = [t.get("metadata", {}).get("emotion", "neutral") for t in user_turns]
+    cooperation_levels = [t.get("metadata", {}).get("cooperation_level", 0.5) for t in user_turns]
+    behaviours = [t.get("metadata", {}).get("behaviour", "normal") for t in user_turns]
 
-        # === 情绪变化趋势 ===
-        st.subheader("📈 情绪变化趋势")
-        emotion_map = {
-            "neutral": 3, "slightly_impatient": 2.5, "uncertain": 2.5,
-            "impatient": 2, "defensive": 2, "passive": 2.5,
-            "angry": 1, "very_angry": 0.5,
-        }
-        emotion_scores = [emotion_map.get(e, 3) for e in emotions]
+    # === 情绪变化趋势 ===
+    st.subheader("📈 情绪变化趋势")
+    emotion_map = {
+        "neutral": 3, "slightly_impatient": 2.5, "uncertain": 2.5,
+        "impatient": 2, "defensive": 2, "passive": 2.5,
+        "angry": 1, "very_angry": 0.5,
+    }
+    emotion_scores = [emotion_map.get(e, 3) for e in emotions]
 
+    try:
         import pandas as pd
         df_emotion = pd.DataFrame({
             "轮次": list(range(1, len(emotion_scores) + 1)),
             "情绪指数": emotion_scores,
-            "情绪标签": emotions,
             "合作度": cooperation_levels,
         })
-
         st.line_chart(df_emotion.set_index("轮次")[["情绪指数", "合作度"]])
+    except Exception:
+        # pandas 不可用时，用纯文本展示
+        for i, (es, cl) in enumerate(zip(emotion_scores, cooperation_levels)):
+            st.markdown(f"轮次 {i+1}: 情绪指数 {es}, 合作度 {cl:.2f}")
 
-        st.caption("""
-        - **情绪指数**: 5=非常积极, 3=中性, 1=非常消极
-        - **合作度**: 用户配合 Agent 的意愿程度
-        """)
+    st.caption("情绪指数: 5=非常积极, 3=中性, 1=非常消极 | 合作度: 用户配合意愿")
 
-        # === 行为统计 ===
-        st.subheader("📊 行为统计")
-        behaviour_counts = {}
-        for b in behaviours:
-            behaviour_counts[b] = behaviour_counts.get(b, 0) + 1
+    # === 行为统计 ===
+    st.subheader("📊 行为统计")
+    behaviour_counts = {}
+    for b in behaviours:
+        behaviour_counts[b] = behaviour_counts.get(b, 0) + 1
 
-        b_labels = {
-            "normal": "正常回复", "interrupt": "打断",
-            "off_topic": "跑题", "faq": "FAQ提问", "reject": "明确拒绝",
-        }
+    b_labels = {
+        "normal": "正常回复", "interrupt": "打断",
+        "off_topic": "跑题", "faq": "FAQ提问", "reject": "明确拒绝",
+    }
 
-        cols = st.columns(len(behaviour_counts) if behaviour_counts else 1)
+    if behaviour_counts:
+        cols = st.columns(min(len(behaviour_counts), 4))
         for i, (b, count) in enumerate(behaviour_counts.items()):
             with cols[i % len(cols)]:
                 st.metric(b_labels.get(b, b), f"{count} 次")
+    else:
+        st.info("无行为统计数据")
 
-        # === 关键行为节点 ===
-        st.subheader("🔍 关键行为节点")
-        key_events = []
-        for i, t in enumerate(user_turns):
-            turn_id = t.get("turn_id", i + 1)
-            content = t.get("content", "")[:40]
-            meta = t.get("metadata", {})
-            behaviour = meta.get("behaviour", "normal")
-            emotion = meta.get("emotion", "neutral")
+    # === 关键行为节点 ===
+    st.subheader("🔍 关键行为节点")
+    key_events = []
+    for i, t in enumerate(user_turns):
+        turn_id = t.get("turn_id", i + 1)
+        content = t.get("content", "")[:40]
+        meta = t.get("metadata", {})
+        behaviour = meta.get("behaviour", "normal")
+        emotion = meta.get("emotion", "neutral")
 
-            if behaviour != "normal":
-                key_events.append({
-                    "轮次": turn_id,
-                    "行为": b_labels.get(behaviour, behaviour),
-                    "情绪": emotion,
-                    "内容": content + "..." if len(t.get("content", "")) > 40 else content,
-                })
-
-        if key_events:
-            st.dataframe(key_events, use_container_width=True, hide_index=True)
-        else:
-            st.info("本次对话中未检测到特殊行为（打断/跑题/FAQ/拒绝）")
-
-        # === 用户意图演变 ===
-        st.subheader("🧠 用户意图演变")
-        intent_stages = []
-        for i, t in enumerate(user_turns):
-            content = t.get("content", "")
-            emotion = t.get("metadata", {}).get("emotion", "neutral")
-
-            # 简单的意图推断
-            if any(kw in content for kw in ["不需要", "不要", "没兴趣", "挂了"]):
-                intent = "明确拒绝"
-                stage_color = "red"
-            elif any(kw in content for kw in ["嗯", "好", "行", "可以"]):
-                intent = "配合/接受"
-                stage_color = "green"
-            elif any(kw in content for kw in ["犹豫", "想想", "不确定", "再考虑"]):
-                intent = "犹豫不决"
-                stage_color = "orange"
-            elif any(kw in content for kw in ["为什么", "怎么", "什么"]):
-                intent = "质疑/询问"
-                stage_color = "blue"
-            elif emotion in ["angry", "very_angry"]:
-                intent = "情绪爆发"
-                stage_color = "red"
-            elif emotion in ["impatient", "slightly_impatient"]:
-                intent = "失去耐心"
-                stage_color = "orange"
-            else:
-                intent = "中性回应"
-                stage_color = "gray"
-
-            intent_stages.append({
-                "轮次": t.get("turn_id", i + 1),
-                "意图": intent,
+        if behaviour != "normal":
+            key_events.append({
+                "轮次": turn_id,
+                "行为": b_labels.get(behaviour, behaviour),
                 "情绪": emotion,
-                "内容摘要": content[:30] + "..." if len(content) > 30 else content,
+                "内容": content + "..." if len(t.get("content", "")) > 40 else content,
             })
 
-        st.dataframe(intent_stages, use_container_width=True, hide_index=True)
+    if key_events:
+        st.dataframe(key_events, use_container_width=True, hide_index=True)
+    else:
+        st.info("本次对话中未检测到特殊行为（打断/跑题/FAQ/拒绝）")
 
-        # === 对 Agent 的测试价值 ===
-        st.divider()
-        st.subheader("🎯 该画像对 Agent 的测试价值")
+    # === 用户意图演变 ===
+    st.subheader("🧠 用户意图演变")
+    intent_stages = []
+    for i, t in enumerate(user_turns):
+        content = t.get("content", "")
+        emotion = t.get("metadata", {}).get("emotion", "neutral")
 
-        test_values = {
-            "normal": [
-                "验证 Agent 标准流程执行能力",
-                "基线对照组，衡量其他画像的难度系数",
-            ],
-            "impatient": [
-                "测试 Agent 信息传递效率",
-                "验证 Agent 是否能快速推进核心任务",
-                "检测冗余话术和重复提问",
-            ],
-            "hesitant": [
-                "测试 Agent 说服能力和信任建立",
-                "验证 Agent 对模糊意图的理解",
-                "检测过度推销或强制行为",
-            ],
-            "rejecting": [
-                "测试 Agent 的边界意识和礼貌终止能力",
-                "验证拒绝后的情绪处理",
-                "检测是否遵守'最多尝试2次'规则",
-            ],
-            "angry": [
-                "测试 Agent 情绪识别和安抚能力",
-                "验证危机处理话术",
-                "检测是否会激化矛盾",
-            ],
-            "silent": [
-                "测试 Agent 主动引导和信息补全能力",
-                "验证对极简回复的处理",
-                "检测是否会陷入无效循环",
-            ],
-        }
+        if any(kw in content for kw in ["不需要", "不要", "没兴趣", "挂了", "别再"]):
+            intent = "明确拒绝"
+        elif any(kw in content for kw in ["嗯", "好", "行", "可以", "没问题"]):
+            intent = "配合/接受"
+        elif any(kw in content for kw in ["犹豫", "想想", "不确定", "再考虑", "看看"]):
+            intent = "犹豫不决"
+        elif any(kw in content for kw in ["为什么", "怎么", "什么", "多少钱"]):
+            intent = "质疑/询问"
+        elif emotion in ["angry", "very_angry"]:
+            intent = "情绪爆发"
+        elif emotion in ["impatient", "slightly_impatient"]:
+            intent = "失去耐心"
+        else:
+            intent = "中性回应"
 
-        for v in test_values.get(persona, ["测试 Agent 通用能力"]):
-            st.markdown(f"- {v}")
+        intent_stages.append({
+            "轮次": t.get("turn_id", i + 1),
+            "意图": intent,
+            "情绪": emotion,
+            "内容摘要": content[:30] + "..." if len(content) > 30 else content,
+        })
 
-        # === 本次对话的关键发现 ===
+    st.dataframe(intent_stages, use_container_width=True, hide_index=True)
+
+    # === 静态信息（测试价值 + 关键发现） ===
+    _show_persona_static_info(persona, emotions, cooperation_levels, behaviour_counts)
+
+
+def _show_persona_static_info(persona: str, emotions=None, cooperation_levels=None, behaviour_counts=None):
+    """展示画像的静态说明信息"""
+
+    # === 对 Agent 的测试价值 ===
+    st.divider()
+    st.subheader("🎯 该画像对 Agent 的测试价值")
+
+    test_values = {
+        "normal": [
+            "验证 Agent 标准流程执行能力",
+            "基线对照组，衡量其他画像的难度系数",
+        ],
+        "impatient": [
+            "测试 Agent 信息传递效率",
+            "验证 Agent 是否能快速推进核心任务",
+            "检测冗余话术和重复提问",
+        ],
+        "hesitant": [
+            "测试 Agent 说服能力和信任建立",
+            "验证 Agent 对模糊意图的理解",
+            "检测过度推销或强制行为",
+        ],
+        "rejecting": [
+            "测试 Agent 的边界意识和礼貌终止能力",
+            "验证拒绝后的情绪处理",
+            "检测是否遵守'最多尝试2次'规则",
+        ],
+        "angry": [
+            "测试 Agent 情绪识别和安抚能力",
+            "验证危机处理话术",
+            "检测是否会激化矛盾",
+        ],
+        "silent": [
+            "测试 Agent 主动引导和信息补全能力",
+            "验证对极简回复的处理",
+            "检测是否会陷入无效循环",
+        ],
+    }
+
+    for v in test_values.get(persona, ["测试 Agent 通用能力"]):
+        st.markdown(f"- {v}")
+
+    # === 本次对话的关键发现 ===
+    if emotions is not None and cooperation_levels is not None and behaviour_counts is not None:
         st.divider()
         st.subheader("📌 本次对话关键发现")
 
@@ -375,7 +411,6 @@ def show_persona_analysis(data: dict):
         if behaviour_counts.get("reject", 0) > 0:
             findings.append(f"用户明确拒绝 {behaviour_counts['reject']} 次，测试 Agent 的终止判断")
 
-        # 合作度变化
         if cooperation_levels:
             first_coop = cooperation_levels[0]
             last_coop = cooperation_levels[-1]
@@ -389,8 +424,6 @@ def show_persona_analysis(data: dict):
 
         for f in findings:
             st.markdown(f"- {f}")
-
-    persona_dialog()
 
 
 def show_stats():
@@ -445,37 +478,53 @@ def show_stats():
 # 页面路由
 # ====================================================
 
-tab1, tab2 = st.tabs(["单次评测", "汇总统计"])
+# 如果有选中的历史记录，优先展示
+if st.session_state.selected_history_idx is not None:
+    idx = st.session_state.selected_history_idx
+    if 0 <= idx < len(st.session_state.history):
+        st.info(f"📚 查看历史记录 #{idx + 1}")
+        show_report(st.session_state.history[idx], readonly=True)
 
-with tab1:
-    if run_btn:
-        with st.spinner("正在运行评测（生成场景 → 模拟对话 → 自动评分）..."):
-            try:
-                resp = requests.post(
-                    f"{API_BASE}/run_eval",
-                    json={
-                        "task_type": task_type,
-                        "user_persona": user_persona,
-                        "difficulty": difficulty,
-                    },
-                    timeout=120,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    st.success(f"评测完成！Session ID: {data['session_id']}")
-                    show_report(data)
-                else:
-                    st.error(f"API 调用失败: {resp.status_code} - {resp.text}")
-            except requests.exceptions.ConnectionError:
-                st.error(
-                    "无法连接到后端服务。请先启动 FastAPI 服务：\n\n"
-                    "```bash\n"
-                    "python -m src.main\n"
-                    "```\n\n"
-                    "然后在本页面重新运行评测。"
-                )
+        if st.button("← 返回最新评测", use_container_width=True):
+            st.session_state.selected_history_idx = None
+            st.rerun()
+    else:
+        st.session_state.selected_history_idx = None
 
-    st.info("请在左侧选择场景配置后点击「运行评测」按钮")
+else:
+    tab1, tab2 = st.tabs(["单次评测", "汇总统计"])
 
-with tab2:
-    show_stats()
+    with tab1:
+        if run_btn:
+            with st.spinner("正在运行评测（生成场景 → 模拟对话 → 自动评分）..."):
+                try:
+                    resp = requests.post(
+                        f"{API_BASE}/run_eval",
+                        json={
+                            "task_type": task_type,
+                            "user_persona": user_persona,
+                            "difficulty": difficulty,
+                        },
+                        timeout=120,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        # 存入历史记录
+                        st.session_state.history.append(data)
+                        st.success(f"评测完成！Session ID: {data['session_id']}")
+                        show_report(data)
+                    else:
+                        st.error(f"API 调用失败: {resp.status_code} - {resp.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error(
+                        "无法连接到后端服务。请先启动 FastAPI 服务：\n\n"
+                        "```bash\n"
+                        "python -m src.main\n"
+                        "```\n\n"
+                        "然后在本页面重新运行评测。"
+                    )
+
+        st.info("请在左侧选择场景配置后点击「运行评测」按钮")
+
+    with tab2:
+        show_stats()
